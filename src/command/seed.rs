@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use rand::Rng;
 use mysql::*;
 use mysql::prelude::*;

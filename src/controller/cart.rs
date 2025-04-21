@@ -61,7 +61,7 @@ pub async fn get_suggestions(
         .products
         .iter()
         .map(|p| service::cart::ProductItem {
-            product_id: p.product_variant_id.clone(),
+            product_variant_id: p.product_variant_id.clone(),
             quantity: p.quantity,
         })
         .collect();

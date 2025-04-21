@@ -38,6 +38,8 @@ impl ProductDimensions {
 }
 
 // ユーザーベクトル表現のための構造体
+
+#[derive(Debug)]
 pub struct UserVector {
     pub region_vector: Vec<f32>,
     pub product_vector: Vec<f32>,
@@ -56,7 +58,7 @@ pub fn region_to_vector(province_code: &str) -> Vec<f32> {
 
     // 都道府県コードを1〜47の範囲で正規化
     let normalized_value = if region_value >= 1 && region_value <= 47 {
-        region_value as f32 / 47.0
+        region_value as f32 % 47.0
     } else {
         0.0
     };
@@ -66,7 +68,7 @@ pub fn region_to_vector(province_code: &str) -> Vec<f32> {
 
 // 商品情報を表す汎用的な構造体
 pub struct ProductItem {
-    pub product_id: String,
+    pub product_variant_id: String,
     pub quantity: u32,
 }
 
@@ -80,7 +82,7 @@ pub fn products_to_vector(
 
     for product in products {
         // 商品IDに対応するインデックスを取得
-        if let Some(index) = product_dimensions.get_index(&product.product_id) {
+        if let Some(index) = product_dimensions.get_index(&product.product_variant_id) {
             // 数量を対応する次元に設定
             vector[index] = product.quantity as f32;
         }
@@ -132,15 +134,22 @@ pub async fn get_similar_products(
 ) -> Vec<(String, f32)> {
     // 汎用的な(製品ID, スコア)のタプルを返す
     // 現在のカートに含まれる商品IDのセットを作成
+    println!("HELLO");
     let current_product_ids: std::collections::HashSet<String> = current_products
         .iter()
-        .map(|p| p.product_id.clone())
+        .map(|p| p.product_variant_id.clone())
         .collect();
-
+    println!("HELLO123");
     // 他のユーザーの購入履歴を取得
     let other_users = match fetch_user_purchase_history(pool, product_dimensions).await {
-        Ok(users) => users,
-        Err(_) => return vec![], // エラー処理を簡略化
+        Ok(users) => {
+            println!("取得したユーザー数: {}", users.len());
+            users
+        }
+        Err(err) => {
+            eprintln!("ユーザー購入履歴取得エラー: {}", err);
+            return vec![]; // エラー時は空のベクトルを返す
+        }
     };
 
     // 類似度計算と上位ユーザー抽出
@@ -173,8 +182,10 @@ pub async fn get_similar_products(
 
             for product in user_products {
                 // 現在のカートにない商品だけを集計
-                if !current_product_ids.contains(&product.product_id) {
-                    *product_scores.entry(product.product_id).or_insert(0.0) += user_similarities
+                if !current_product_ids.contains(&product.product_variant_id) {
+                    *product_scores
+                        .entry(product.product_variant_id)
+                        .or_insert(0.0) += user_similarities
                         .iter()
                         .find(|(idx, _)| *idx == user_idx)
                         .map(|(_, score)| *score)
@@ -228,45 +239,55 @@ async fn fetch_user_purchase_history(
     let mut conn = pool.get_conn()?;
 
     // ユーザーごとの地域情報と購入商品を取得
-    let rows = conn.query_map(
-        "SELECT 
-          u.user_id, 
-          u.province_code,
-          oi.product_variant_id,
-          SUM(oi.quantity) as total_quantity
-      FROM 
-          users u
-      JOIN 
-          orders o ON u.user_id = o.user_id
-      JOIN 
-          order_items oi ON o.order_id = oi.order_id
-      WHERE 
-          o.status = 'completed'
-      GROUP BY 
-          u.user_id, u.province_code, oi.product_variant_id
-      ORDER BY 
-          u.user_id",
-        |(user_id, province_code, product_id, quantity): (u64, String, String, u32)| {
-            (user_id, province_code, product_id, quantity)
+    let rows = conn.exec_map(
+        "
+              SELECT 
+                c.id,
+                c.shipping_province_code,
+                op.variant_id,
+                SUM(op.quantity) as total_quantity
+              FROM
+                customers c
+              JOIN
+                orders o ON c.id = o.customer_id
+              JOIN
+                order_products op ON o.id = op.order_id
+              GROUP BY
+                o.processed_at
+              LIMIT 1000
+              ",
+        (),
+        |row: mysql::Row| {
+            let customer_id: String = row.get("id").unwrap_or_default();
+
+            let province_code: String = row.get("shipping_province_code").unwrap_or_default();
+
+            let variant_id: i64 = row.get("variant_id").unwrap_or(0);
+            let variant_id_str = variant_id.to_string();
+
+            let quantity: String = row.get("total_quantity").unwrap_or_default();
+            let quantity_num = quantity.parse::<u32>().unwrap_or(0);
+
+            (customer_id, province_code, variant_id_str, quantity_num)
         },
     )?;
 
-    // ユーザーIDごとにグループ化
-    let mut user_products: HashMap<u64, (String, Vec<ProductItem>)> = HashMap::new();
+    // customer IDごとにグループ化
+    let mut customer_products: HashMap<String, (String, Vec<ProductItem>)> = HashMap::new();
 
-    for (user_id, province_code, product_id, quantity) in rows {
-        let entry = user_products
-            .entry(user_id)
+    for (customer_id, province_code, product_variant_id, quantity) in rows {
+        let entry = customer_products
+            .entry(customer_id)
             .or_insert_with(|| (province_code, Vec::new()));
 
         entry.1.push(ProductItem {
-            product_id,
+            product_variant_id, // 変数名も変更
             quantity,
         });
     }
 
     // 各ユーザーのベクトルを作成
-    let user_vectors = user_products
+    let user_vectors: Vec<UserVector> = customer_products
         .into_iter()
         .map(|(_, (province_code, products))| {
             create_user_vector(&province_code, &products, product_dimensions)
@@ -275,7 +296,6 @@ async fn fetch_user_purchase_history(
 
     Ok(user_vectors)
 }
-
 // 特定ユーザーの商品購入履歴を取得
 async fn fetch_user_products(
     pool: &Arc<mysql::Pool>,
@@ -284,21 +304,28 @@ async fn fetch_user_products(
     let mut conn = pool.get_conn()?;
 
     let products = conn.exec_map(
-        "SELECT 
-        oi.product_variant_id,
+        "
+      SELECT
+        oi.variant_id,
         SUM(oi.quantity) as total_quantity
-    FROM 
+      FROM
         orders o
-    JOIN 
-        order_products oi ON o.order_id = oi.order_id
-    WHERE 
-        o.user_id = ?
-    GROUP BY 
-        oi.product_variant_id",
-        (user_id,), // カンマを追加してタプルにする
-        |(product_id, quantity): (String, u32)| ProductItem {
-            product_id,
-            quantity,
+      JOIN
+        order_products oi ON o.id = oi.order_id
+      WHERE
+        o.customer_id = ?
+      GROUP BY
+        oi.variant_id
+      ",
+        (user_id,),
+        |(variant_id, quantity): (i64, String)| {
+            // 整数型と文字列型を適切に変換
+            let quantity_num = quantity.parse::<u32>().unwrap_or(0);
+
+            ProductItem {
+                product_variant_id: variant_id.to_string(), // 整数を文字列に変換
+                quantity: quantity_num,
+            }
         },
     )?;
 
