@@ -215,21 +215,19 @@ pub async fn generate_orders(count: usize) -> Result<()> {
 
 fn generate_order_products(tx: &mut Transaction, order_ids: &[String], products: &[(String, String)]) -> Result<(), mysql::Error> {
     for (i, order_id) in order_ids.iter().enumerate() {
+        
         // 進捗表示（10,000件ごと）
         if i % 10000 == 0 && i > 0 {
             println!("{}/{}件 注文商品データ生成完了", i, order_ids.len());
         }
         
         // 各注文に1〜5個の商品を追加
-        let product_count = rand::rng().random_range(1..=5);
+        let product_count = rand::rng().random_range(2..=10);
         
         for _ in 0..product_count {
-            // ランダムな商品を選択
-            let product_index = rand::rng().random_range(0..products.len());
-            let (product_id, variant_id) = &products[product_index];
             
             // 数量をランダムに決定
-            let quantity = rand::rng().random_range(1..=3);
+            let quantity = rand::rng().random_range(2..=32);
             
             // 価格は0円
             let price = 0;
@@ -243,7 +241,11 @@ fn generate_order_products(tx: &mut Transaction, order_ids: &[String], products:
             // 現在の日時
             let now = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
             
-            
+            // ランダムな商品を選択
+            let product_index = rand::rng().random_range(0..products.len());
+            let (product_id, variant_id) = &products[product_index];
+
+
             // SQLクエリを実行（format!マクロを使用）
             let query = format!(
                 "INSERT INTO order_products (order_id, product_id, variant_id, quantity, price, 
@@ -253,6 +255,7 @@ fn generate_order_products(tx: &mut Transaction, order_ids: &[String], products:
                 order_id, product_id, variant_id, quantity, price,
                 is_subscription, is_brand_new_discount, now, now
             );
+
 
             tx.exec_drop(query, ())?;
         }

@@ -1,6 +1,6 @@
 use axum::{
-    extract::{Query, State},
     Json,
+    extract::{Query, State},
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use std::sync::Arc;
@@ -67,7 +67,7 @@ pub async fn get_suggestions(
         .collect();
 
     // 現在のユーザーベクトルを作成
-    let current_user = service::cart::create_user_vector(
+    let current_user = service::cart::create_order_vector(
         &params.province_code,
         &product_items,
         &product_dimensions,
@@ -81,6 +81,8 @@ pub async fn get_suggestions(
         &product_dimensions,
     )
     .await;
+
+    println!("{}件の類似商品を取得しました", similar_product_scores.len());
 
     let suggestions = similar_product_scores
         .into_iter()

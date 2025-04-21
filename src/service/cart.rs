@@ -2,6 +2,7 @@ use mysql::prelude::Queryable;
 use std::{collections::HashMap, sync::Arc};
 
 // 商品IDとインデックスのマッピングを保持する構造体
+#[derive(Debug)]
 pub struct ProductDimensions {
     product_to_index: HashMap<String, usize>,
     dimension: usize,
@@ -35,14 +36,27 @@ impl ProductDimensions {
     pub fn get_dimension(&self) -> usize {
         self.dimension
     }
+
+    pub fn get_product_id_from_index(&self, index: usize) -> Option<&String> {
+        self.product_to_index
+            .iter()
+            .find(|&(_, &idx)| idx == index)
+            .map(|(product_id, _)| product_id)
+    }
 }
 
 // ユーザーベクトル表現のための構造体
 
-#[derive(Debug)]
-pub struct UserVector {
+#[derive(Clone, Debug)]
+pub struct OrderVector {
     pub region_vector: Vec<f32>,
     pub product_vector: Vec<f32>,
+}
+
+#[derive(Debug)]
+pub struct CustomerScore {
+    pub customer_vector: OrderVector,
+    pub score: f32,
 }
 
 // 地域コードをベクトルに変換する関数
@@ -79,7 +93,7 @@ pub fn products_to_vector(
 ) -> Vec<f32> {
     let dimension = product_dimensions.get_dimension();
     let mut vector = vec![0.0; dimension];
-
+    println!("products: {}", products.len());
     for product in products {
         // 商品IDに対応するインデックスを取得
         if let Some(index) = product_dimensions.get_index(&product.product_variant_id) {
@@ -87,25 +101,16 @@ pub fn products_to_vector(
             vector[index] = product.quantity as f32;
         }
     }
-
-    // ベクトルの正規化（オプション）
-    let magnitude = vector.iter().map(|&x| x * x).sum::<f32>().sqrt();
-    if magnitude > 0.0 {
-        for val in &mut vector {
-            *val /= magnitude;
-        }
-    }
-
     vector
 }
 
 // ユーザーベクトルを作成する関数
-pub fn create_user_vector(
+pub fn create_order_vector(
     region_code: &str,
     products: &[ProductItem],
     product_dimensions: &ProductDimensions,
-) -> UserVector {
-    UserVector {
+) -> OrderVector {
+    OrderVector {
         region_vector: region_to_vector(region_code),
         product_vector: products_to_vector(products, product_dimensions),
     }
@@ -128,20 +133,19 @@ pub async fn fetch_product_dimensions(
 
 pub async fn get_similar_products(
     pool: &Arc<mysql::Pool>,
-    current_user: &UserVector,
+    current_order: &OrderVector,
     current_products: &[ProductItem],
     product_dimensions: &ProductDimensions,
 ) -> Vec<(String, f32)> {
     // 汎用的な(製品ID, スコア)のタプルを返す
     // 現在のカートに含まれる商品IDのセットを作成
-    println!("HELLO");
     let current_product_ids: std::collections::HashSet<String> = current_products
         .iter()
         .map(|p| p.product_variant_id.clone())
         .collect();
-    println!("HELLO123");
+
     // 他のユーザーの購入履歴を取得
-    let other_users = match fetch_user_purchase_history(pool, product_dimensions).await {
+    let other_orders = match fetch_user_purchase_history(pool, product_dimensions).await {
         Ok(users) => {
             println!("取得したユーザー数: {}", users.len());
             users
@@ -153,48 +157,48 @@ pub async fn get_similar_products(
     };
 
     // 類似度計算と上位ユーザー抽出
-    let mut user_similarities: Vec<(usize, f32)> = other_users
+    let mut user_similarities: Vec<CustomerScore> = other_orders
         .iter()
         .enumerate()
-        .map(|(idx, user)| (idx, combined_similarity(current_user, user, 0.2)))
+        .map(|(_idx, other_order)| {
+            let similarity = combined_similarity(current_order, &other_order, 0.2);
+            CustomerScore {
+                customer_vector: other_order.clone(),
+                score: similarity,
+            }
+        })
         .collect();
 
     // 類似度で降順ソート
-    user_similarities.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    user_similarities.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     // 上位N人のユーザーを抽出
     const TOP_USERS: usize = 10;
-    let top_users: Vec<usize> = user_similarities
-        .iter()
-        .take(TOP_USERS)
-        .map(|(idx, _)| *idx)
-        .collect();
+    let top_customer_scores: Vec<&CustomerScore> =
+        user_similarities.iter().take(TOP_USERS).collect();
 
     // 商品スコアを集計
     let mut product_scores: HashMap<String, f32> = HashMap::new();
 
-    for &user_idx in &top_users {
-        if user_idx < other_users.len() {
-            // 上位ユーザーの購入履歴からスコアを集計
-            let user_products = fetch_user_products(pool, user_idx as u64)
-                .await
-                .unwrap_or_default();
+    for customer_score in &top_customer_scores {
+        let order_vector = &customer_score.customer_vector;
 
-            for product in user_products {
-                // 現在のカートにない商品だけを集計
-                if !current_product_ids.contains(&product.product_variant_id) {
-                    *product_scores
-                        .entry(product.product_variant_id)
-                        .or_insert(0.0) += user_similarities
-                        .iter()
-                        .find(|(idx, _)| *idx == user_idx)
-                        .map(|(_, score)| *score)
-                        .unwrap_or(0.0);
+        for (index, &quantity) in order_vector.product_vector.iter().enumerate() {
+            if quantity > 0.0 {
+                if let Some(product_id) = product_dimensions.get_product_id_from_index(index) {
+                    if !current_product_ids.contains(product_id) {
+                        *product_scores.entry(product_id.clone()).or_insert(0.0) +=
+                            customer_score.score * quantity;
+                    }
                 }
             }
         }
     }
-
+    println!("類似商品スコア: {:?}", product_scores);
     // スコア順にソートして返す
     let mut suggestions: Vec<(String, f32)> = product_scores.into_iter().collect();
 
@@ -223,7 +227,7 @@ pub fn cosine_similarity(vec1: &[f32], vec2: &[f32]) -> f32 {
     }
 }
 
-pub fn combined_similarity(user1: &UserVector, user2: &UserVector, region_weight: f32) -> f32 {
+pub fn combined_similarity(user1: &OrderVector, user2: &OrderVector, region_weight: f32) -> f32 {
     let product_similarity = cosine_similarity(&user1.product_vector, &user2.product_vector);
     let region_similarity = cosine_similarity(&user1.region_vector, &user2.region_vector);
 
@@ -235,7 +239,7 @@ pub fn combined_similarity(user1: &UserVector, user2: &UserVector, region_weight
 async fn fetch_user_purchase_history(
     pool: &Arc<mysql::Pool>,
     product_dimensions: &ProductDimensions,
-) -> Result<Vec<UserVector>, mysql::Error> {
+) -> Result<Vec<OrderVector>, mysql::Error> {
     let mut conn = pool.get_conn()?;
 
     // ユーザーごとの地域情報と購入商品を取得
@@ -245,15 +249,13 @@ async fn fetch_user_purchase_history(
                 c.id,
                 c.shipping_province_code,
                 op.variant_id,
-                SUM(op.quantity) as total_quantity
+                op.quantity
               FROM
                 customers c
               JOIN
                 orders o ON c.id = o.customer_id
               JOIN
                 order_products op ON o.id = op.order_id
-              GROUP BY
-                o.processed_at
               LIMIT 1000
               ",
         (),
@@ -265,10 +267,9 @@ async fn fetch_user_purchase_history(
             let variant_id: i64 = row.get("variant_id").unwrap_or(0);
             let variant_id_str = variant_id.to_string();
 
-            let quantity: String = row.get("total_quantity").unwrap_or_default();
-            let quantity_num = quantity.parse::<u32>().unwrap_or(0);
+            let quantity: u32 = row.get("quantity").unwrap_or_default();
 
-            (customer_id, province_code, variant_id_str, quantity_num)
+            (customer_id, province_code, variant_id_str, quantity)
         },
     )?;
 
@@ -287,47 +288,12 @@ async fn fetch_user_purchase_history(
     }
 
     // 各ユーザーのベクトルを作成
-    let user_vectors: Vec<UserVector> = customer_products
+    let user_vectors: Vec<OrderVector> = customer_products
         .into_iter()
         .map(|(_, (province_code, products))| {
-            create_user_vector(&province_code, &products, product_dimensions)
+            create_order_vector(&province_code, &products, product_dimensions)
         })
         .collect();
 
     Ok(user_vectors)
-}
-// 特定ユーザーの商品購入履歴を取得
-async fn fetch_user_products(
-    pool: &Arc<mysql::Pool>,
-    user_id: u64,
-) -> Result<Vec<ProductItem>, mysql::Error> {
-    let mut conn = pool.get_conn()?;
-
-    let products = conn.exec_map(
-        "
-      SELECT
-        oi.variant_id,
-        SUM(oi.quantity) as total_quantity
-      FROM
-        orders o
-      JOIN
-        order_products oi ON o.id = oi.order_id
-      WHERE
-        o.customer_id = ?
-      GROUP BY
-        oi.variant_id
-      ",
-        (user_id,),
-        |(variant_id, quantity): (i64, String)| {
-            // 整数型と文字列型を適切に変換
-            let quantity_num = quantity.parse::<u32>().unwrap_or(0);
-
-            ProductItem {
-                product_variant_id: variant_id.to_string(), // 整数を文字列に変換
-                quantity: quantity_num,
-            }
-        },
-    )?;
-
-    Ok(products)
 }

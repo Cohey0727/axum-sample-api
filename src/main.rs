@@ -1,8 +1,13 @@
-use axum::{routing::get, Router};
+use axum::{
+    Router,
+    http::{HeaderValue, Method},
+    routing::get,
+};
 use dotenv::dotenv;
 use std::env;
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
+use tower_http::cors::{Any, CorsLayer};
 
 mod command;
 mod config;
@@ -38,10 +43,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pool = mysql::Pool::new(opts).expect("データベース接続に失敗しました");
     let arc_pool = std::sync::Arc::new(pool);
 
+    // CORSを許可するミドルウェアを設定
+    let cors = CorsLayer::new()
+        // すべてのオリジンを許可
+        .allow_origin(Any)
+        // すべてのヘッダーを許可
+        .allow_headers(Any)
+        // すべてのメソッドを許可
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::DELETE,
+            Method::OPTIONS,
+        ]);
+
     let app = Router::new()
         .route("/users", get(controller::users::get_users))
         .route("/suggestions", get(controller::cart::get_suggestions))
-        .with_state(arc_pool);
+        .with_state(arc_pool)
+        .layer(cors); // CORSミドルウェアを追加
 
     let addr = SocketAddr::from(([127, 0, 0, 1], 3939));
     let listener = TcpListener::bind(addr).await.unwrap();
