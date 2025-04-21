@@ -12,12 +12,14 @@ pub fn get_database_url() -> String {
             let user = env::var("MYSQL_USER").unwrap_or_default();
             let password = env::var("MYSQL_PASSWORD").unwrap_or_default();
             let port = env::var("MYSQL_PORT").unwrap_or_default();
+            let host = env::var("MYSQL_HOST").unwrap_or_default();
             let database = env::var("MYSQL_DATABASE").unwrap_or_default();
 
             let url = url
                 .replace("${MYSQL_USER}", &user)
                 .replace("${MYSQL_PASSWORD}", &password)
                 .replace("${MYSQL_PORT}", &port)
+                .replace("${MYSQL_HOST}", &host)
                 .replace("${MYSQL_DATABASE}", &database);
 
             url
