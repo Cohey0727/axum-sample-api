@@ -215,17 +215,23 @@ pub async fn generate_orders(count: usize) -> Result<()> {
 
 fn generate_order_products(tx: &mut Transaction, order_ids: &[String], products: &[(String, String)]) -> Result<(), mysql::Error> {
     for (i, order_id) in order_ids.iter().enumerate() {
-        
         // 進捗表示（10,000件ごと）
         if i % 10000 == 0 && i > 0 {
             println!("{}/{}件 注文商品データ生成完了", i, order_ids.len());
         }
         
-        // 各注文に1〜5個の商品を追加
+        // 各注文に2〜10個の商品を追加
         let product_count = rand::rng().random_range(2..=10);
         
+        // 先に各注文の商品リストを作成
+        let mut selected_products: Vec<&(String, String)> = Vec::with_capacity(product_count);
         for _ in 0..product_count {
-            
+            let product_index = rand::rng().random_range(0..products.len());
+            selected_products.push(&products[product_index]);
+        }
+        
+        // 選択した商品リストでイテレーション
+        for (product_id, variant_id) in selected_products {
             // 数量をランダムに決定
             let quantity = rand::rng().random_range(2..=32);
             
@@ -240,11 +246,6 @@ fn generate_order_products(tx: &mut Transaction, order_ids: &[String], products:
             
             // 現在の日時
             let now = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
-            
-            // ランダムな商品を選択
-            let product_index = rand::rng().random_range(0..products.len());
-            let (product_id, variant_id) = &products[product_index];
-
 
             // SQLクエリを実行（format!マクロを使用）
             let query = format!(
@@ -255,7 +256,6 @@ fn generate_order_products(tx: &mut Transaction, order_ids: &[String], products:
                 order_id, product_id, variant_id, quantity, price,
                 is_subscription, is_brand_new_discount, now, now
             );
-
 
             tx.exec_drop(query, ())?;
         }

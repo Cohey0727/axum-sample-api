@@ -93,7 +93,6 @@ pub fn products_to_vector(
 ) -> Vec<f32> {
     let dimension = product_dimensions.get_dimension();
     let mut vector = vec![0.0; dimension];
-    println!("products: {}", products.len());
     for product in products {
         // 商品IDに対応するインデックスを取得
         if let Some(index) = product_dimensions.get_index(&product.product_variant_id) {
@@ -161,7 +160,7 @@ pub async fn get_similar_products(
         .iter()
         .enumerate()
         .map(|(_idx, other_order)| {
-            let similarity = combined_similarity(current_order, &other_order, 0.2);
+            let similarity = combined_similarity(current_order, &other_order, 0.8);
             CustomerScore {
                 customer_vector: other_order.clone(),
                 score: similarity,
@@ -256,7 +255,7 @@ async fn fetch_user_purchase_history(
                 orders o ON c.id = o.customer_id
               JOIN
                 order_products op ON o.id = op.order_id
-              LIMIT 1000
+              LIMIT 10000
               ",
         (),
         |row: mysql::Row| {
